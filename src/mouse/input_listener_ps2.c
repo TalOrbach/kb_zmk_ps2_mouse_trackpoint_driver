@@ -185,7 +185,7 @@ static void filter_with_input_config(const struct input_listener_ps2_config *cfg
 
     // LOG_INF("layer_state: %d, code: %s, value: %d", zmk_keymap_layer_state(),
     //         get_input_code_name(evt), evt->value);
-    if (cfg->scroll_layer >= 0 && zmk_keymap_highest_layer_active() == cfg->scroll_layer) {
+    if (cfg->scroll_layer >= 0 && zmk_keymap_layer_active(cfg->scroll_layer)) {
         switch (evt->code) {
         case INPUT_REL_X:
             evt->code = INPUT_REL_HWHEEL;
