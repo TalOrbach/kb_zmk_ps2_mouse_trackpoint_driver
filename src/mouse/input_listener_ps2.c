@@ -10,13 +10,16 @@
 #include <zephyr/kernel.h>
 #include <zephyr/input/input.h>
 #include <zephyr/logging/log.h>
+#include <string.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 
+#include <zmk/behavior.h>
 #include <zmk/endpoints.h>
 #include <zmk/event_manager.h>
+#include <zmk/events/layer_state_changed.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/keymap.h>
 #include <zmk/pointing.h>
@@ -331,8 +334,26 @@ void zmk_input_listener_ps2_layer_toggle_deactivate_layer(struct k_work *item) {
     data->layer_toggle_layer_enabled = false;
 }
 
-static void zmk_input_listener_ps2_layer_toggle_deactivate_on_keypress(
-    const struct device *dev, const struct zmk_position_state_changed *ev) {
+static bool behavior_name_matches(const struct zmk_behavior_binding *binding, const char *label,
+                                  const char *node_name) {
+    return binding != NULL && binding->behavior_dev != NULL &&
+           (strcmp(binding->behavior_dev, label) == 0 ||
+            strcmp(binding->behavior_dev, node_name) == 0);
+}
+
+static bool binding_is_transparent(const struct zmk_behavior_binding *binding) {
+    return behavior_name_matches(binding, "trans", "transparent");
+}
+
+static bool binding_is_mouse_action(const struct zmk_behavior_binding *binding) {
+    return behavior_name_matches(binding, "mkp", "mouse_key_press") ||
+           behavior_name_matches(binding, "msc", "mouse_scroll") ||
+           behavior_name_matches(binding, "sc_btn", "scroll_layer_mouse_button");
+}
+
+static void
+zmk_input_listener_ps2_layer_toggle_handle_keypress(const struct device *dev,
+                                                    const struct zmk_position_state_changed *ev) {
     if (!ev->state) {
         return;
     }
@@ -345,29 +366,62 @@ static void zmk_input_listener_ps2_layer_toggle_deactivate_on_keypress(
         return;
     }
 
-    LOG_DBG("Scheduling layer %d deactivation due to keypress at position %d", config->layer_toggle,
-            ev->position);
+    const struct zmk_behavior_binding *binding =
+        zmk_keymap_get_layer_binding_at_idx(config->layer_toggle, ev->position);
+
+    if (binding_is_transparent(binding)) {
+        LOG_DBG("Scheduling layer %d deactivation due to transparent keypress at position %d",
+                config->layer_toggle, ev->position);
+        k_work_reschedule(&data->layer_toggle_deactivation_delay, K_NO_WAIT);
+    } else if (binding_is_mouse_action(binding)) {
+        LOG_DBG("Extending layer %d timeout due to mouse action at position %d",
+                config->layer_toggle, ev->position);
+        k_work_reschedule(&data->layer_toggle_deactivation_delay,
+                          K_MSEC(config->layer_toggle_timeout_ms));
+    }
+}
+
+static void zmk_input_listener_ps2_layer_toggle_handle_layer_state_changed(
+    const struct device *dev, const struct zmk_layer_state_changed *ev) {
+    const struct input_listener_ps2_config *config = dev->config;
+    struct input_listener_ps2_data *data = dev->data;
+
+    if (!ev->state || config->layer_toggle == -1 || ev->layer == config->layer_toggle ||
+        ev->layer == zmk_keymap_layer_default() || !data->layer_toggle_layer_enabled ||
+        !zmk_keymap_layer_active(config->layer_toggle)) {
+        return;
+    }
+
+    LOG_DBG("Scheduling layer %d deactivation because layer %d was activated", config->layer_toggle,
+            ev->layer);
     k_work_reschedule(&data->layer_toggle_deactivation_delay, K_NO_WAIT);
 }
 
-#define DEACTIVATE_LAYER_TOGGLE_ON_KEYPRESS(n)                                                     \
-    zmk_input_listener_ps2_layer_toggle_deactivate_on_keypress(DEVICE_DT_INST_GET(n), ev);
+#define HANDLE_LAYER_TOGGLE_POSITION_EVENT(n)                                                      \
+    zmk_input_listener_ps2_layer_toggle_handle_keypress(DEVICE_DT_INST_GET(n), pos_ev);
 
-static int zmk_input_listener_ps2_position_state_changed_listener(const zmk_event_t *eh) {
-    const struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
+#define HANDLE_LAYER_TOGGLE_LAYER_EVENT(n)                                                         \
+    zmk_input_listener_ps2_layer_toggle_handle_layer_state_changed(DEVICE_DT_INST_GET(n), layer_ev);
 
-    if (ev == NULL) {
+static int zmk_input_listener_ps2_layer_toggle_event_listener(const zmk_event_t *eh) {
+    const struct zmk_position_state_changed *pos_ev = as_zmk_position_state_changed(eh);
+    if (pos_ev != NULL) {
+        DT_INST_FOREACH_STATUS_OKAY(HANDLE_LAYER_TOGGLE_POSITION_EVENT)
+
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    DT_INST_FOREACH_STATUS_OKAY(DEACTIVATE_LAYER_TOGGLE_ON_KEYPRESS)
+    const struct zmk_layer_state_changed *layer_ev = as_zmk_layer_state_changed(eh);
+    if (layer_ev != NULL) {
+        DT_INST_FOREACH_STATUS_OKAY(HANDLE_LAYER_TOGGLE_LAYER_EVENT)
+    }
 
     return ZMK_EV_EVENT_BUBBLE;
 }
 
-ZMK_LISTENER(input_listener_ps2_layer_toggle,
-             zmk_input_listener_ps2_position_state_changed_listener);
+ZMK_LISTENER(input_listener_ps2_layer_toggle, zmk_input_listener_ps2_layer_toggle_event_listener);
 ZMK_SUBSCRIPTION(input_listener_ps2_layer_toggle, zmk_position_state_changed);
+ZMK_SUBSCRIPTION(input_listener_ps2_layer_toggle, zmk_layer_state_changed);
 
 static int zmk_input_listener_ps2_layer_toggle_init(const struct input_listener_ps2_config *config,
                                                     struct input_listener_ps2_data *data) {
