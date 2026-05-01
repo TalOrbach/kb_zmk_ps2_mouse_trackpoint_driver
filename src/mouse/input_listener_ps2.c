@@ -16,6 +16,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 
 #include <zmk/endpoints.h>
+#include <zmk/event_manager.h>
+#include <zmk/events/position_state_changed.h>
 #include <zmk/keymap.h>
 #include <zmk/pointing.h>
 #include <zmk/hid.h>
@@ -328,6 +330,44 @@ void zmk_input_listener_ps2_layer_toggle_deactivate_layer(struct k_work *item) {
 
     data->layer_toggle_layer_enabled = false;
 }
+
+static void zmk_input_listener_ps2_layer_toggle_deactivate_on_keypress(
+    const struct device *dev, const struct zmk_position_state_changed *ev) {
+    if (!ev->state) {
+        return;
+    }
+
+    const struct input_listener_ps2_config *config = dev->config;
+    struct input_listener_ps2_data *data = dev->data;
+
+    if (config->layer_toggle == -1 || !data->layer_toggle_layer_enabled ||
+        !zmk_keymap_layer_active(config->layer_toggle)) {
+        return;
+    }
+
+    LOG_DBG("Scheduling layer %d deactivation due to keypress at position %d", config->layer_toggle,
+            ev->position);
+    k_work_reschedule(&data->layer_toggle_deactivation_delay, K_NO_WAIT);
+}
+
+#define DEACTIVATE_LAYER_TOGGLE_ON_KEYPRESS(n)                                                     \
+    zmk_input_listener_ps2_layer_toggle_deactivate_on_keypress(DEVICE_DT_INST_GET(n), ev);
+
+static int zmk_input_listener_ps2_position_state_changed_listener(const zmk_event_t *eh) {
+    const struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
+
+    if (ev == NULL) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    DT_INST_FOREACH_STATUS_OKAY(DEACTIVATE_LAYER_TOGGLE_ON_KEYPRESS)
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(input_listener_ps2_layer_toggle,
+             zmk_input_listener_ps2_position_state_changed_listener);
+ZMK_SUBSCRIPTION(input_listener_ps2_layer_toggle, zmk_position_state_changed);
 
 static int zmk_input_listener_ps2_layer_toggle_init(const struct input_listener_ps2_config *config,
                                                     struct input_listener_ps2_data *data) {
